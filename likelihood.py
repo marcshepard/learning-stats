@@ -204,6 +204,3 @@ def optional_stopping_experimentation():
     plot_p_values_over_time(2000, 0, 1)             # Even with no effect, you eventually get a significant p-value 
     optional_stopping_sim (100, 5, 10000, 0.05, 0)  # This shows the percent of false positives over a number of experiements using optional stopping 
     optional_stopping_sim (100, 5, 1000, 0.0158, 0) # Early stopping using https://en.wikipedia.org/wiki/Pocock_boundary adjusted alpha level
-
-
-optional_stopping_sim (100, 5, 5000, 0.0158, 0)
