@@ -2,7 +2,7 @@
 
 #pylint: disable-msg=invalid-name, line-too-long, import-error, too-many-arguments
 
-from scipy.stats import binom, beta
+from scipy.stats import binom, beta, ttest_ind
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -67,8 +67,6 @@ def likelyhood_experimentation():
         print (f"Likelihood of {H0} over {H1} for {x}/{n} heads = {compare_likelihoods(n, x, H0, H1)}")
         #plot_likelihoods(n, x, H0, H1)
 
-#likelyhood_experimentation()
-
 def binomialBayes (n : int, x : int, a_prior : float, b_prior : float, plot : bool = False, H0 = .5) -> None:
     """Calculate the posterior probability of a binomial distribution, and optionally plot the three graphs
     n = number of trials
@@ -117,10 +115,95 @@ def plot_mean_and_credible_interval (a, b):
     plt.ylabel("Density")
     plt.show()
 
-# 10 heads out of 20 flips with no prior beleif
-#binomialBayes (20, 10, 1, 1, True)
+def binomialBayesExperimentation():
+    """Experiment with binomial Bayes"""
 
-# 90 out of 100 heads with strong prior belief
-#binomialBayes (100, 90, 100, 100, True)
+    # 10 heads out of 20 flips with no prior beleif
+    binomialBayes (20, 10, 1, 1, True, H0=.5)
 
-plot_mean_and_credible_interval (11, 11)
+    # 90 out of 100 heads with strong prior belief
+    binomialBayes (100, 90, 100, 100, True)
+
+    # Credible interval
+    plot_mean_and_credible_interval (11, 11)
+
+# Plot single p value over time for experiment that keeps collecting more data
+def plot_p_values_over_time(n, D, SD):
+    """Plot p-values over time for an experiment that keeps collecting more data
+    n = number of datapoints to collect after the first 10
+    D = true effect size
+    SD = true standard deviation"""
+
+    start = 10 # don't generate r values for the first 10 datapoints
+
+    p = np.zeros(n+start)
+    x = np.zeros(n+start)
+    y = np.zeros(n+start)
+
+    for i in range(start, n+start):
+        x[i] = np.random.normal(0, SD)
+        y[i] = np.random.normal(D, SD)
+        p[i] = ttest_ind(x[0:i], y[0:i], equal_var=True)[1]
+
+    # Plot p-values starting at the 10th datapoint
+    plt.plot(p[start+1:])
+    plt.axhline(0.05, color="k", linestyle="--")
+    plt.title(f"p-values over time\nLowest p-value was {min(p[start+1:]):.2f} at sample size {np.argmin(p[start+1:])+start+1}")
+    plt.xlabel("Sample size")
+    plt.ylabel("p-value")
+    plt.show()
+
+def optional_stopping_sim (n, looks, n_sims, alpha, d):
+    """Simulate optional stopping
+    n = number of datapoints to collect
+    looks = number of times to look at the data
+    n_sims = number of simulations
+    alpha = alpha level
+    d = true effect size (0 to simulate Type 1 errors)"""
+
+    # Create matrix to store p-values
+    p = np.zeros((n_sims, looks))
+
+    # Loop through simulations
+    for i in range(n_sims):
+        # Generate data
+        x = np.random.normal(0, 1, n)
+        y = np.random.normal(d, 1, n)
+
+        # Loop through looks
+        for j in range(looks):
+            # Perform t-test
+            p[i, j] = ttest_ind(x[0:(j+1)*n//looks], y[0:(j+1)*n//looks], equal_var=True)[1]
+
+    # Plot histogram of min p values across looks for each similation
+    plt.subplot(1, 2, 1)
+    p_min = p.min(axis=1)
+    plt.hist(p_min, bins=100)
+    plt.axhline(n_sims/100, color="k", linestyle="--")
+    plt.xlabel("Min across looks per experiment")
+    plt.ylabel("count")
+
+    # Plot histogram of the average p value across looks for each similation
+    plt.subplot(1, 2, 2)
+    plt.hist(p, bins=100)
+    plt.axhline(len(p)/100, color="k", linestyle="--")
+    plt.xlabel("All looks")
+    plt.ylabel("count")
+
+    # Calculate the percent of p_min values less than alpha
+    sig_p_min = int(sum(p_min<alpha)/len(p_min) * 100)
+    # Calculate the percent of p values less than alpha
+    sig_p = int(sum(p.flatten()<alpha)/len(p.flatten()) * 100)
+
+
+    plt.suptitle(f"Histogram of p-values when stopping is optional\n% significant experiments={sig_p_min}. % significant p-values={sig_p}")
+    plt.show()
+
+def optional_stopping_experimentation():
+    """Experiment with optional stopping to show this can inflate type 1 errors"""
+    plot_p_values_over_time(2000, 0, 1)             # Even with no effect, you eventually get a significant p-value 
+    optional_stopping_sim (100, 5, 10000, 0.05, 0)  # This shows the percent of false positives over a number of experiements using optional stopping 
+    optional_stopping_sim (100, 5, 1000, 0.0158, 0) # Early stopping using https://en.wikipedia.org/wiki/Pocock_boundary adjusted alpha level
+
+
+optional_stopping_sim (100, 5, 5000, 0.0158, 0)
