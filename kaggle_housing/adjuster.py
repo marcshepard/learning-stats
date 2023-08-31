@@ -19,7 +19,7 @@ from sklearn.linear_model import Lasso, Ridge
 from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
 from sklearn.preprocessing import OneHotEncoder, RobustScaler
 from sklearn.pipeline import Pipeline, FeatureUnion
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, KFold
 
 # For reproduceability
 np.random.seed(12)
@@ -40,7 +40,7 @@ def print_metrics(yhat_train, y_train, yhat_val, y_val):
     trace_dbg (f"Val MAE of unnormalized prices: {mean_absolute_error(yhat_val, y_val):.0f}")
     trace_dbg (f"Val MPE of unnormalized prices: {mean_absolute_percentage_error(yhat_val, y_val):.2%}")
 
-def print_feature_importances(model, df, label, dropped_cols=()):
+def print_feature_importances(model, df, label, dropped_cols=(), threshold=0):
     """ Print feature importances for the model, where df is a pandas dataframe and label is the target variable
     The model is split into train and validation sets, trained, then feature importance is calculated by checking the RMSE
     for each column when it is set to it's mean value (vs a baseline RMSE when all column values are used as is)
@@ -65,7 +65,7 @@ def print_feature_importances(model, df, label, dropped_cols=()):
             X[col] = X[col].mode()[0]
         yhat = model.predict(X)
         rmse = np.sqrt(mean_squared_error(y_val, yhat))
-        if rmse <= baseline_rmse:
+        if rmse <= baseline_rmse + threshold:
             useless.append(col)
         else:
             importance[col] = rmse - baseline_rmse
@@ -146,10 +146,10 @@ class DataCleaner(TransformerMixin):
         # While I've not trained on the test data, the code below shows it has nulls not found in the training data, so we'll have to guess how to deal with them
         df["Exterior2nd"].fillna('None', inplace=True)      # Not currently in final model
         df["Utilities"].fillna('None', inplace=True)        # Not currently in final model
-        df["SaleType"].fillna('Unknown', inplace=True)      # Not currently used in final model
-        df["MSZoning"].fillna('Unknown', inplace=True)      # Currently in final model (linear) - can it be removed or only used conditionally?
-        df["Functional"].fillna('Typ', inplace=True)        # Currently in final model (linear) - can it be removed or only used conditionally?
-        df["Exterior1st"].fillna('Unknown', inplace=True)   # Currently in final model (linear) - can it be removed or only used conditionally?
+        df["SaleType"].fillna('Unknown', inplace=True)      # In the final model; fully onehotencoded
+        df["MSZoning"].fillna('Unknown', inplace=True)      # In the final model; fully onehotencoded
+        df["Functional"].fillna('Typ', inplace=True)        # In the final mode; used by linear layer but not residual tree layer
+        df["Exterior1st"].fillna('Unknown', inplace=True)   # In the final mode; used by linear layer but not residual tree layer
 
         null_cols = set(col for col in df.columns if df[col].isnull().sum() > 0)
         for col in null_cols:
@@ -255,11 +255,11 @@ class TreeModelTransformer(TransformerMixin):
 
     @property
     def drop_cols(self):
-        """ Return a list of columns that get dropped because they help neither linear model """
-        return ['Alley', 'BedroomAbvGr', 'BldgType', 'BsmtFinSF2', 'BsmtFinType2', 'BsmtUnfSF', 'Condition1', 'Condition2', 'Electrical', 'EnclosedPorch',
-                'Exterior2nd', 'ExterCond', 'ExterQual', 'Exterior1st',
-                'FullBath', 'Functional', 'GarageCond', 'Heating', 'HouseStyle', 'KitchenQual', 'LandContour', 'LandSlope', 'LotShape', 'LowQualFinSF', 
-                'MasVnrArea', 'MoSold', 'MiscFeature', 'MiscVal', 'PoolQC', 'RoofMatl', 'PavedDrive', 'RoofStyle', 'Street', 'Utilities', 'WoodDeckSF', 'YrSold'
+        """ Return a list of columns that get dropped because they help neither tree model """
+        return ['3SsnPorch', 'Alley', 'BedroomAbvGr', 'BldgType', 'BsmtFinSF2', 'BsmtFinType2', 'BsmtHalfBath', 'BsmtUnfSF', 'Condition1', 'Condition2', 'Electrical', 'EnclosedPorch',
+                'Exterior2nd', 'ExterCond', 'ExterQual', 'Exterior1st', 'Fireplaces',
+                'FullBath', 'Functional', 'GarageArea', 'GarageYrBlt', 'GarageCond', 'Heating', 'HouseStyle', 'KitchenQual', 'LandContour', 'LandSlope', 'LotShape', 'LowQualFinSF', 
+                'MasVnrArea', 'MasVnrType', 'MoSold', 'MiscFeature', 'MiscVal', 'PoolQC', 'RoofMatl', 'PavedDrive', 'RoofStyle', 'Street', 'Utilities', 'WoodDeckSF', 'YrSold'
         ]
 
 def get_onehot_encoder ():
@@ -300,16 +300,16 @@ def evaluate_models(df, label):
         ('tree_model_transformer', TreeModelTransformer()),
         ('one_hot_encoder', get_onehot_encoder()),
         ('scaler', RobustScaler()),
-        ('GB', GradientBoostingRegressor()) # n_estimators=1000, learning_rate=.01, max_depth=3, max_features='sqrt', min_samples_leaf=15, min_samples_split=10, loss='huber'))
+        ('GB', GradientBoostingRegressor(n_estimators=200, max_depth=4, learning_rate=.06))
         ])
-    
+
     histgb = Pipeline(steps=[
         ('add_linear_estimates', AddEstimatates(lasso, "linear_model_estimates")),
         ('data_cleaner', DataCleaner()),
         ('tree_model_transformer', TreeModelTransformer()),
         ('one_hot_encoder', get_onehot_encoder()),
         ('scaler', RobustScaler()),
-        ('GB', HistGradientBoostingRegressor()) # n_estimators=1000, learning_rate=.01, max_depth=3, max_features='sqrt', min_samples_leaf=15, min_samples_split=10, loss='huber'))
+        ('GB', HistGradientBoostingRegressor(learning_rate=.07))
         ])
 
     model_name, model = "Ridge", ridge
@@ -320,27 +320,39 @@ def evaluate_models(df, label):
     evaluate_model(model_name, model, df, label)
     #print_feature_importances(model, df, label, dropped_cols=lasso.named_steps["linear_model_transformer"].drop_cols)
 
-    """
     # Next, let's see if we can get a tree based model to fine tune the residuals of the linear model
     model_name, model = "Gb", gb
-    gb.fit(df.drop(label, axis=1), df[label])
     evaluate_model(model_name, model, df, label)
-    print_feature_importances(model, df, label, dropped_cols=gb.named_steps["tree_model_transformer"].drop_cols)
+    #print_feature_importances(model, df, label, dropped_cols=gb.named_steps["tree_model_transformer"].drop_cols, threshold=.001)
 
     model_name, model = "HistGb", histgb
-    gb.fit(df.drop(label, axis=1), df[label])
     evaluate_model(model_name, model, df, label)
-    print_feature_importances(model, df, label, dropped_cols=gb.named_steps["tree_model_transformer"].drop_cols)
-    """
+    #print_feature_importances(model, df, label, dropped_cols=gb.named_steps["tree_model_transformer"].drop_cols, threshold=.001)
+
+    model_name, model = "Gb + Lasso", AveragePredictor([gb, lasso])
+    evaluate_model(model_name, model, df, label)
+
+    model_name, model = "GB + HistGB + Ridge", AveragePredictor([gb, lasso, histgb])
+    evaluate_model(model_name, model, df, label)
+    #print_feature_importances(model, df, label, dropped_cols=gb.named_steps["tree_model_transformer"].drop_cols)
+
+    model = AveragePredictor([gb, lasso, histgb])
+    model.fit(df.drop(label, axis=1), df[label])
+    test_df = pd.read_csv("kaggle_housing/data_test.csv")
+    test_df[label] = np.exp(model.predict(test_df))
+    test_df[["Id", label]].to_csv('kaggle_housing/submission.csv', index=False)
+    print("Submission saved")
+
 
 def evaluate_model(model_name, model, df, label, cv=5):
     """ Evaluate the model using cross validation """ 
     scores = cross_val_score(model, df.drop(label, axis=1), df[label], cv=cv, scoring='neg_mean_squared_error')
-    print(f"{model_name} CV RMSE: {np.sqrt(np.mean(-scores)):.4f}")
+    score = np.sqrt(np.mean(-scores))
+    print(f"{model_name} CV RMSE: {score:.4f}")
+    return score
 
-def evaluate_model(model_name, model, df, label, cv=5):
+def evaluate_model2(model_name, model, df, label, cv=5):
     """ Alternative version, since cross_val_score doesn't give good error messages when I have a bug in the pipeline """
-    from sklearn.model_selection import KFold
     kf = KFold(cv)
     mses = []
     for train_index, test_index in kf.split(df):
@@ -349,7 +361,9 @@ def evaluate_model(model_name, model, df, label, cv=5):
         model.fit(X_train, y_train)
         yhat = model.predict(X_test)
         mses.append(mean_squared_error(yhat, y_test))
-    print(f"{model_name} CV RMSE: {np.mean(mses)**.5:.4f}")
+    score = np.mean(mses)**.5
+    print(f"{model_name} CV RMSE: {score:.4f}")
+    return score
 
 def do_it():
     """ Run the experiment """
