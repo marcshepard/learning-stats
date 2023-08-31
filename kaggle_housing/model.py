@@ -1,14 +1,30 @@
-"""
-Experiment with the concept of an "adjuster" for the housing model.
-Idea is:
-* First fit a linear model, starting with just numeric features and pruning out the ones not useful,
-  and adding a handful of categorical features if useful.
-* Next, fit a tree-based model (e.g. random forest) to the residuals of the linear model, to capture
-  the non-linearities.
-"""
-
-# Ignore certain pyline warnings
 # pylint: disable=invalid-name, line-too-long, import-error
+
+"""
+This is the code I used for the https://www.kaggle.com/c/house-prices-advanced-regression-techniques competition.
+This code got a top 7% score, which is OK, but there is definitely room for tuning it for better results.
+However my goal was just to learn the process of building and tuning a sci-kit learn pipeline, so I'll call it good.
+
+I first did some preliminary data exploration in data-exploration.ipynb. Have a look there for graphs and observations.
+
+Then I wrote this code, which includes:
+1) DataCleaner - generic cleanup to to remove NaNs, adjust column data types, and remove the Id column, per documentation
+2) Built scikit_learn pipelines for the Lasso and Ridge linear model that work like so:
+    a) DataCleaner for basic cleanup
+    b) LinearModelTransformer (more on that below)
+    c) OneHotEncodes any categorical features that (b) outputs
+    d) Scale all features
+    d) Apply a linear model
+3) Tuned the linear pipeline to improve the "evaluate_model" metric (it does kfold(cv=5) evaluation of the competition RMSE metric) by:
+    a) Iteratively: tuning LinearModelTransformer by dropping columns that were not helping either linear model (using print_feature_importances), and adding a few derived features
+    b) Iteratively: tuning hyperparameters for each linear model. I did this by hand - really should have used GridSearchCV
+4) Built a couple of tree based models to adjust the results of the linear models:
+    a) It has a similar pipeline, but with a TreeModelTransformer instead of LinearModelTransformer at the 2nd stage 
+    b) Did the same type of tuning as in 3 above
+    c) I found the results were no better, so I added an additional first stage, AddEstimates, that let the linear models add their estimates for the tree models to use.
+5) Built an ensemble model that averaged the predictions, using the AveragePredictor class.
+6) Trained the final model on the entire training set, and used it to generate a submission.csv file for the competition.
+"""
 
 # Imports
 import pandas as pd
