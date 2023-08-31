@@ -10,11 +10,11 @@ import pandas as pd
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
-from sklearn.linear_model import LinearRegression, Lasso, Ridge
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import Lasso, Ridge
+from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
 from sklearn.preprocessing import OneHotEncoder, RobustScaler # StandardScaler, MinMaxScaler
 from sklearn.pipeline import Pipeline, FeatureUnion
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_score
 
 # For reproduceability
 np.random.seed(12)
@@ -57,6 +57,21 @@ def print_feature_importances(X, y, model):
     for col, rmse in sorted(importance.items(), key=lambda x: x[1], reverse=True):
         print (f"{col}: {rmse:.4f}")
 
+class AveragePredictor(BaseEstimator):
+    """ Average the prediction of serveral models """
+    def __init__(self, models):
+        self.models = models
+
+    def fit(self, X, y=None):
+        """ Fit all  models """
+        for model in self.models:
+            model.fit(X.copy(), y)
+        return self
+
+    def predict(self, X):
+        """ Average the predictions of all models """
+        yhat = np.mean([model.predict(X.copy()) for model in self.models], axis=0)
+        return yhat
 
 class TypeSelector(BaseEstimator, TransformerMixin):
     """ Pipeline componenet to select columns of a particular type; needed for column transformers """
@@ -107,13 +122,12 @@ class DataCleaner(BaseEstimator, TransformerMixin):
         df["Electrical"].fillna('Mix', inplace=True)
 
         # While I've not trained on the test data, the code below shows it has nulls not found in the training data, so we'll have to guess how to deal with them
-        # Update: None of these seem to be used in our final model (they all get dropped), so we don't need to worry about them
-        df["Functional"].fillna('Typ', inplace=True)
-        df["Utilities"].fillna('None', inplace=True)
-        df["MSZoning"].fillna('Unknown', inplace=True)
-        df["SaleType"].fillna('Unknown', inplace=True)
-        df["Exterior1st"].fillna('Unknown', inplace=True)
-        df["Exterior2nd"].fillna('None', inplace=True)
+        df["Functional"].fillna('Typ', inplace=True)        # Not currently used in final model
+        df["Utilities"].fillna('None', inplace=True)        # Dropped in final model
+        df["MSZoning"].fillna('Unknown', inplace=True)      # Only used in final model if = C (all); deduct for ZoneCommercial
+        df["SaleType"].fillna('Unknown', inplace=True)      # Not currently used in final model
+        df["Exterior1st"].fillna('Unknown', inplace=True)   # Not currently used in final model
+        df["Exterior2nd"].fillna('None', inplace=True)      # Not currently used in final model
 
         null_cols = set(col for col in df.columns if df[col].isnull().sum() > 0)
         for col in null_cols:
@@ -157,11 +171,10 @@ class UnskewFeatures (BaseEstimator, TransformerMixin):
             df[cols] = np.log(df[cols])
 
         return df
-
-class CategoricTransformer(BaseEstimator, TransformerMixin):
-    """ Transform categorical features to numeric features """
+    
+class DropOrTransform(BaseEstimator, TransformerMixin):
+    """ Certain columns should be either dropped entirely or transformed to something else """
     def __init__(self, is_linear):
-        self.ran = False
         self.is_linear = is_linear  # Behaviour is different for linear vs tree-based models
 
     def fit(self, X, y=None):
@@ -177,27 +190,28 @@ class CategoricTransformer(BaseEstimator, TransformerMixin):
         df.drop(["FullBath", "HalfBath", "BsmtFullBath", "BsmtHalfBath"], axis=1, inplace=True)
 
         # Hand-craft a few features from the categorical data
-        df["HasTenisCounrt"] = df.MiscFeature.apply(lambda x: 1 if x == 'TenC' else 0)
-        df.drop("MiscFeature", axis=1, inplace=True)        # 96% nulls, and only TenisCounrt is useful. TODO - consider dropping HasTenisCounrt as well
 
-        #['LotShape', 'HouseStyle', 'MasVnrType', 'Foundation']
-        # CentralAir, GarageFinish
-        df["PartialSalesCondition"] = df.SaleCondition.apply(lambda x: 1 if x == 'Partial' else 0)  # Partial sales are more expensive
-        df["HasCentralAir"] = df.CentralAir.apply(lambda x: 1 if x == 'Y' else 0)                  # Central air adds $500 (not much, but it helps)
+        # OneHotEncode a few categorical values before dropping the feature
+        if self.is_linear:
+            df["SalesCondition"] = df.SaleCondition.apply(lambda x: 1 if x == 'Partial' else 0 if x == 'Normal' else -1)
+            df["KitchenAbvGr"] = df["KitchenAbvGr"].apply (lambda x: 1 if x == 1 else 0)
+
+        df["EstateSale"] = df.SaleType.apply(lambda x: 1 if x == 'COD' else 0)              # Estate sales are cheaper
+        df["IsNew"] = df.SaleType.apply(lambda x: 1 if x == 'New' else 0)                   # New buildings are more expensive
+        df["CentralAir"] = df.CentralAir.apply(lambda x: 1 if x == 'Y' else 0)              # Central air adds $500 (not much, but it helps)
         df["ZoneCommercial"] = df["MSZoning"].apply (lambda x: 1 if x == 'C (all)' else 0)
-        df["StreetPaved"] = df["Street"].apply (lambda x: 1 if x == 'Pave' else 0)
 
-        # Drop some categorical columns for now - we'll add them back in later as they prove useful
-        drop_cols = ['MSSubClass', 'MSZoning', 'Street', 'Alley', 'LotShape', 'LandContour',
-       'LotConfig', 'LandSlope', 'Condition1', 'Condition2',
-       'BldgType', 'HouseStyle', 'RoofStyle', 'RoofMatl', 'Exterior1st',
-       'Exterior2nd', 'MasVnrType', 'Foundation',
-       'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2', 'Heating',
-       'Electrical', 'Functional', 'GarageType',
-       'GarageFinish', 'PavedDrive', 'Fence', 'SaleType', 'SaleCondition', "Utilities"]
-        for col in drop_cols:
-            if isinstance(df[col].dtype, np.number):
-                print (col)
+        # Drop some categorical columns
+        drop_cols = ["Alley", "BldgType", "BsmtFinType2", "Electrical", "Fence", "Heating",
+                     "PoolQC", "RoofMatl", "RoofStyle", "Street", "Utilities"]   # Definite no's from exploratory analysis
+
+        drop_cols += ["BsmtExposure", "BsmtFinType1", "Condition1", "Condition2", "Exterior1st", "Exterior2nd",
+                      "Foundation", "Functional", "GarageFinish", "GarageType",
+                    "BldgType", "LandContour", "LandSlope", "LotConfig", "LotShape",
+                    "MSSubClass", "MSZoning", "MasVnrType", "PavedDrive", "SaleType"] # TBD if we'll use these or not
+
+        # Also drop useless numeric columns
+        drop_cols += ['3SsnPorch', 'PoolArea', 'MoSold', 'YrSold', 'BsmtFinSF2', 'EnclosedPorch', 'LowQualFinSF', 'LotFrontage', 'MiscVal']
         df.drop(drop_cols, axis=1, inplace=True)
 
         return df
@@ -219,7 +233,7 @@ def create_pipeline(model, is_linear):
     # Pipeline for categorical features
     cat_pipeline = Pipeline(steps=[
         ('select_categorical', TypeSelector('object')),
-        ('one_hot_encoder', OneHotEncoder(handle_unknown='ignore'))
+        ('one_hot_encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
     ])
 
     # Create a column transformer to apply the pipelines to the appropriate columns
@@ -234,14 +248,56 @@ def create_pipeline(model, is_linear):
     pipeline = Pipeline(steps=[
         ('data_cleaner', DataCleaner()),
         ('label_encoder', LabelEncoder()),
-        ('categorical_transformer', CategoricTransformer(is_linear)),
+        ('drop_or_transform', DropOrTransform(is_linear)),
         ('column_transformer', column_transformer),
         ('model', model)
     ])
 
     return pipeline
 
+def evaluate_model(model, df, label, model_name):
+    """ Evaluate the model using cross validation """
+    cv_score = cross_val_score(model, df.drop(label, axis=1), df[label], scoring='neg_mean_squared_error')
+    print(f"{model_name} RMSE: {(-cv_score.mean())**.5:.4f}")
+
 def evaluate_models():
+    """ Create various models and evaluate them """
+    train_csv = "kaggle_housing/data_train.csv"
+    label = "SalePrice"
+
+    df = pd.read_csv(train_csv)
+
+    # Scale the target column (SalePrice) by taking the log, to remove skewness and not penalize predictions on less expensive houses
+    df.SalePrice = np.log(df.SalePrice)
+
+    models = [
+        ('Lasso ', Lasso(alpha=.001), True),
+        ('Ridge ', Ridge(alpha=9), True),
+        ('GB    ', GradientBoostingRegressor(), False),
+        ('HistGB', HistGradientBoostingRegressor(), False),
+    ]
+
+    pipelines = {}
+
+    for name, model, is_linear in models:
+        model = create_pipeline(model, is_linear)
+        evaluate_model(model, df, label, name)
+        pipelines[name] = model
+
+    ensemble = AveragePredictor(list(pipelines.values()))
+    evaluate_model(ensemble, df, label, "Ensemble")
+
+    # print the most important features from the final (random forest) model
+    print ("\nFeature importance:")
+    ensemble.fit(df.drop(label, axis=1), df[label])
+    #print_feature_importances(df.drop(label, axis=1), df[label], ensemble)
+
+    # Predict on the test data
+    test_csv = "kaggle_housing/data_test.csv"
+    df_test = pd.read_csv(test_csv)
+    ensemble.predict(df_test)
+
+def tune_hyperparams():
     """ Create various models and evaluate them """
     train_csv = "kaggle_housing/data_train.csv"
     label = "SalePrice"
@@ -254,42 +310,45 @@ def evaluate_models():
     # Split the data into training and test sets
     X_train, X_val, y_train, y_val = train_test_split(df.drop(label, axis=1), df[label], test_size=0.2, random_state=12)
 
-    models = [('Lasso with alpha=.005', Lasso(alpha=.005), True),
-            ('Ridge', Ridge(), True),
-            ('GB', GradientBoostingRegressor(), False),
-            ('RF', RandomForestRegressor(n_estimators=300, n_jobs=-1), False)
-    ]
+    alpha_to_rmse = []
+    best_alpha = None
+    best_rmse = 1000000
+    for alpha in np.linspace(7, 10, 50):
+        model = create_pipeline(Ridge(alpha=alpha), True)
+        model.fit(X_train.copy(), y_train)
+        yhat_val = model.predict(X_val.copy())
+        rmse = np.sqrt(mean_squared_error(yhat_val, y_val))
+        alpha_to_rmse.append((alpha, rmse))
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_alpha = alpha
 
-    pipelines = {}
+    print ("best alpha:", best_alpha)
 
-    for name, model, is_linear in models:
-        print (f"\n{name}")
-        pipeline = create_pipeline(model, is_linear)
-        pipeline.fit(X_train.copy(), y_train)
-        pipelines[name] = pipeline
+    # Graph alpha_to_rmse
+    import matplotlib.pyplot as plt
+    alphas = [x[0] for x in alpha_to_rmse]
+    rmses = [x[1] for x in alpha_to_rmse]
+    plt.plot(alphas, rmses)
+    plt.show()
 
-        yhat_train = pipeline.predict(X_train.copy())
-        yhat_val = pipeline.predict(X_val.copy())
-        print_metrics(yhat_train, y_train, yhat_val, y_val)
 
-    print ("\nEnsemble: all models")
-    ensemble_prediction = np.mean([pipeline.predict(X_val.copy()) for pipeline in pipelines.values()], axis=0)
-    print_metrics(ensemble_prediction, y_val, ensemble_prediction, y_val)
+    #model = create_pipeline(Lasso(), True)
+    #if False:
+    #    for key, value in model.get_params().items():
+    #        print (key)
+    #        print(value)
+    #        print()
 
-    print ("\nEnsemble: Ridge + GB")
-    ensemble_prediction = np.mean([pipelines[model].predict(X_val.copy()) for model in ["Ridge", "GB"]], axis=0)
-    print_metrics(ensemble_prediction, y_val, ensemble_prediction, y_val)
+    #params = {'model__alpha': [0.001]}
 
-    # print the most important features from the final (random forest) model
-    #print ("\nTraining feature importance:")
-    #print_feature_importances(X_train, y_train, pipeline)
-    #print ("\nValidation feature importance:")
-    #print_feature_importances(X_val, y_val, pipeline)
+    #from sklearn.model_selection import GridSearchCV
+    #grid_search = GridSearchCV(model, params, cv=5, scoring='neg_mean_squared_error', return_train_score=True)
+    #grid_search.fit(X_train, y_train)
+    #print (grid_search.best_params_)
+    #print (grid_search.best_score_)
 
-    # Predict on the test data
-    #test_csv = "kaggle_housing/data_test.csv"
-    #df_test = pd.read_csv(test_csv)
-    #pipeline.predict(df_test)
+
 
 if __name__ == "__main__":
     evaluate_models()
